@@ -9,6 +9,8 @@ import torch
 import numpy as np
 
 from chemprop.rdkit import make_mol, make_polymer_mol
+from chemprop.features.polymer_motifs import POLYMER_MOTIFS
+
 
 class Featurization_parameters:
     """
@@ -399,6 +401,11 @@ class MolGraph:
         self.is_explicit_h = is_explicit_h()
         self.is_adding_hs = is_adding_hs()
         self.reaction_mode = reaction_mode()
+        #print("=" * 60)
+        #print("MolGraph constructor")
+        #print("self.is_polymer =", self.is_polymer)
+        #print("type(mol) =", type(mol))
+        #print("=" * 60)
         
         # Convert SMILES to RDKit molecule if necessary
         if type(mol) == str:
@@ -418,6 +425,7 @@ class MolGraph:
         self.degree_of_polym = 1  # degree of polymerization
         self.f_atoms = []  # mapping from atom index to atom features
         self.f_bonds = []  # mapping from bond index to concat(in_atom, bond) features
+        self.f_bond_only = []  # Pure bond features (without concatenated atom features)
         self.w_bonds = []  # mapping from bond index to bond weight
         self.w_atoms = []  # mapping from atom index to atom weight
         self.a2b = []  # mapping from atom index to incoming bond indices
@@ -425,6 +433,11 @@ class MolGraph:
         self.b2revb = []  # mapping from bond index to the index of the reverse bond
         self.overwrite_default_atom_features = overwrite_default_atom_features
         self.overwrite_default_bond_features = overwrite_default_bond_features
+        
+        # Motif-aware representation (NEW)
+        self.atom_to_motif = None  # (N_atoms,) mapping atom idx to motif ID
+        self.interface_idx = None  # (N_interface,) indices of polymerization interface atoms
+        self.num_motifs = 0  # total number of motifs
 
         # =============
         # Standard mode
@@ -464,8 +477,13 @@ class MolGraph:
                         else:
                             f_bond += descr
 
+                    # Directed bond: a1 -> a2
                     self.f_bonds.append(self.f_atoms[a1] + f_bond)
+                    self.f_bond_only.append(f_bond)
+
+                    # Directed bond: a2 -> a1
                     self.f_bonds.append(self.f_atoms[a2] + f_bond)
+                    self.f_bond_only.append(f_bond)
 
                     # Update index mappings
                     b1 = self.n_bonds
@@ -519,6 +537,7 @@ class MolGraph:
 
             # remove R groups -> now atoms in rdkit Mol object have the same order as self.f_atoms
             rwmol = remove_wildcard_atoms(rwmol)
+            self.rwmol = rwmol
 
             # Initialize atom to bond mapping for each atom
             for _ in range(self.n_atoms):
@@ -544,6 +563,9 @@ class MolGraph:
 
                     self.f_bonds.append(self.f_atoms[a1] + f_bond)
                     self.f_bonds.append(self.f_atoms[a2] + f_bond)
+                    # Store pure bond features for both directed bonds
+                    self.f_bond_only.append(f_bond)
+                    self.f_bond_only.append(f_bond)
 
                     # Update index mappings
                     b1 = self.n_bonds
@@ -615,6 +637,9 @@ class MolGraph:
 
                 self.f_bonds.append(self.f_atoms[a1] + f_bond)
                 self.f_bonds.append(self.f_atoms[a2] + f_bond)
+                self.f_bond_only.append(f_bond)
+                self.f_bond_only.append(f_bond)
+
 
                 # Update index mappings
                 b1 = self.n_bonds
@@ -737,7 +762,280 @@ class MolGraph:
                     self.b2a.append(a2)
                     self.b2revb.append(b2)
                     self.b2revb.append(b1)
-                    self.n_bonds += 2                
+                    self.n_bonds += 2
+        
+        # ================================
+        # Motif-aware representation (NEW)
+        # ================================
+        self._assign_motifs()
+
+    def _assign_motifs(self) -> None:
+        """
+        Assign atoms to polymer-specific motifs using enhanced SMARTS patterns.
+        
+        Motif categories (priority order):
+        - 10: ester (C(=O)-O-C)
+        - 9:  amide (C(=O)-N)
+        - 8:  carbonyl (C=O)
+        - 7:  ether (C-O-C)
+        - 6:  amine (C-N-C)
+        - 5:  sulfur-containing (S, thioether, sulfone)
+        - 4:  aromatic (C in aromatic ring)
+        - 3:  secondary carbon (C with H)
+        - 2:  primary carbon (C with multiple H)
+        - 1:  quaternary carbon (C-C-C-C)
+        - 0:  default backbone carbon
+        """
+        from rdkit import Chem
+        
+        # =====================================================
+        # Motif bookkeeping
+        # =====================================================
+
+# atom index -> motif instance id
+        self.atom_to_motif = np.full(self.n_atoms, -1, dtype=np.int64)
+
+# motif instance -> list of atom indices
+        self.motif_to_atoms = {}
+
+# motif instance -> motif type
+        self.motif_instance_type = {}
+
+        interface_atoms = []
+        
+        # Get molecule reference for pattern matching
+        #print("\n========== _assign_motifs DEBUG ==========")
+        #print("self.is_polymer:", self.is_polymer)
+        #print("self.n_atoms:", self.n_atoms)
+        #print("has polymer_info:", hasattr(self, "polymer_info"))
+        #print("polymer_info:", self.polymer_info)
+        #print("has rwmol:", hasattr(self, "rwmol"))
+        #if hasattr(self, "rwmol"):
+           #print("rwmol type:", type(self.rwmol))
+           #print("rwmol atoms:", self.rwmol.GetNumAtoms())
+        #print("=========================================\n")
+        mol_to_match = None
+        if self.is_polymer and hasattr(self, 'polymer_info'):
+            # Polymer mode: use rwmol (RWMol from tag_atoms_in_repeating_unit)
+            # atoms are already filtered to 'core' atoms only
+            mol_to_match = getattr(self, 'rwmol', None)
+        else:
+            # Non-polymer mode: use regular molecule
+            mol_to_match = getattr(self, 'mol', None)
+        
+        if mol_to_match is not None and self.n_atoms > 0:
+            # Pre-process: compile patterns
+            assigned = np.zeros(self.n_atoms, dtype=bool)
+
+            instance_id = 0
+
+            for motif in POLYMER_MOTIFS:
+
+    # -------------------------------------------------
+    # SMARTS motifs
+    # -------------------------------------------------
+
+                if motif.detector == "smarts":
+
+                   if motif.smarts is None:
+                       continue
+
+                   pattern = Chem.MolFromSmarts(motif.smarts)
+
+                   if pattern is None:
+                      continue
+
+                   try:
+
+                       matches = mol_to_match.GetSubstructMatches(pattern)
+
+                   except Exception as e:
+
+                       print(f"[MolGraph] SMARTS failed for {motif.name}: {e}")
+                       continue
+
+                   for match in matches:
+
+                       atoms = []
+
+                       for atom_idx in match:
+
+                           if atom_idx >= self.n_atoms:
+                              continue
+
+                           if assigned[atom_idx]:
+                              continue
+
+                           atoms.append(atom_idx)
+
+                       if len(atoms) == 0:
+                              continue
+
+                       self.motif_to_atoms[instance_id] = atoms
+
+                       self.motif_instance_type[instance_id] = motif.name
+
+                       for atom_idx in atoms:
+
+                           self.atom_to_motif[atom_idx] = instance_id
+                           assigned[atom_idx] = True
+
+                       instance_id += 1
+
+   # -------------------------------------------------
+# Aromatic systems (connected aromatic components)
+# -------------------------------------------------
+
+                elif motif.detector == "rdkit_ring":
+
+                    aromatic_atoms = {
+                        atom.GetIdx()
+                        for atom in mol_to_match.GetAtoms()
+                        if atom.GetIsAromatic()
+                    }
+
+                    visited = set()
+
+                    for start in aromatic_atoms:
+
+                        if start in visited:
+                            continue
+
+                        stack = [start]
+                        component = []
+
+                        while stack:
+
+                            current = stack.pop()
+
+                            if current in visited:
+                                continue
+
+                            visited.add(current)
+                            component.append(current)
+
+                            atom = mol_to_match.GetAtomWithIdx(current)
+
+                            for nbr in atom.GetNeighbors():
+
+                                j = nbr.GetIdx()
+
+                                if (
+                                    j in aromatic_atoms
+                                    and j not in visited
+                                ):
+                                    stack.append(j)
+
+                        atoms = [
+                            idx for idx in component
+                            if not assigned[idx]
+                        ]
+
+                        if len(atoms) == 0:
+                            continue
+
+                        self.motif_to_atoms[instance_id] = atoms
+                        self.motif_instance_type[instance_id] = motif.name
+
+                        for atom_idx in atoms:
+                            self.atom_to_motif[atom_idx] = instance_id
+                            assigned[atom_idx] = True
+
+                        instance_id += 1
+# -------------------------------------------------
+# Remaining atoms -> connected backbone fragments
+# -------------------------------------------------
+
+            remaining = set(np.where(~assigned)[0].tolist())
+
+            while remaining:
+
+    # Start one connected component
+                start = remaining.pop()
+
+                component = [start]
+
+                queue = [start]
+
+                while queue:
+
+                    atom_idx = queue.pop()
+
+                    atom = mol_to_match.GetAtomWithIdx(atom_idx)
+
+                    for nbr in atom.GetNeighbors():
+
+                        nbr_idx = nbr.GetIdx()
+
+                        if nbr_idx in remaining:
+
+                            remaining.remove(nbr_idx)
+
+                            component.append(nbr_idx)
+
+                            queue.append(nbr_idx)
+
+    # Create one backbone motif instance
+                self.motif_to_atoms[instance_id] = component
+
+                self.motif_instance_type[instance_id] = "backbone"
+
+                for atom_idx in component:
+
+                    self.atom_to_motif[atom_idx] = instance_id
+
+                    assigned[atom_idx] = True
+
+                instance_id += 1
+
+            self.num_motifs = instance_id
+
+            #print(
+    #f"[MolGraph] Created {self.num_motifs} motif instances"
+#)
+
+            #for idx in range(self.num_motifs):
+
+                #print(
+    #f"  Instance {idx:2d} | "
+    #f"{self.motif_instance_type[idx]:20s} | "
+    #f"{len(self.motif_to_atoms[idx])} atoms | "
+    #f"{self.motif_to_atoms[idx]}"
+#)
+        else:
+            # Fallback: single motif for all atoms
+            self.atom_to_motif = np.zeros(self.n_atoms, dtype=np.int64)
+            self.num_motifs = 1
+            print(f"[MolGraph] Motif assignment (fallback): {self.n_atoms} atoms → 1 motif (backbone only)")
+        
+        # ====================================
+        # Extract interface atoms
+        # ====================================
+        if self.is_polymer and hasattr(self, 'polymer_info') and self.polymer_info:
+            # polymer_info: list of (r1, r2, w_bond12, w_bond21) tuples
+            # r1, r2 are attachment indices like 1, 2, etc.
+            # Find atoms marked as attachment points
+            
+            # Strategy: iterate through polymer_info entries and find corresponding atoms
+            # In the rwmol, attachment atoms should be accessible via properties
+            if hasattr(self, 'rwmol'):
+                for atom in self.rwmol.GetAtoms():
+                    if atom.HasProp('R'):
+                        r_prop = atom.GetProp('R')
+                        # Check if this R group is in polymer_info
+                        for r1, r2, _, _ in self.polymer_info:
+                            if f'*{r1}' == r_prop or f'*{r2}' == r_prop:
+                                atom_idx = atom.GetIdx()
+                                if 0 <= atom_idx < self.n_atoms:
+                                    interface_atoms.append(atom_idx)
+        
+        # Fallback if no interface atoms found but polymer
+        if self.is_polymer and len(interface_atoms) == 0 and self.polymer_info:
+            # Heuristic: first few atoms are likely interface atoms
+            interface_atoms = list(range(min(len(self.polymer_info) * 2, max(1, self.n_atoms // 4))))
+        
+        self.interface_idx = np.array(sorted(set(interface_atoms)), dtype=np.int64)
+        #print(f"[MolGraph] Interface atoms: {len(self.interface_idx)} atoms {list(self.interface_idx)[:5]}{'...' if len(self.interface_idx) > 5 else ''}")
 
 class BatchMolGraph:
     """
@@ -770,18 +1068,46 @@ class BatchMolGraph:
         self.a_scope = []  # list of tuples indicating (start_atom_index, num_atoms) for each molecule
         self.b_scope = []  # list of tuples indicating (start_bond_index, num_bonds) for each molecule
         self.degree_of_polym = []  # list of floats with degree of polymerization used when --polymer
+        
+       # =====================================================
+# Motif-aware batch attributes
+# =====================================================
+
+# atom index -> global motif instance id
+        self.atom_to_motif_batch = None
+
+# global motif instance -> list of global atom indices
+        self.motif_to_atoms_batch = {}
+
+# global motif instance -> motif type
+        self.motif_instance_type_batch = {}
+
+# interface atoms in batch
+        self.interface_idx_batch = None
+
+# total motif instances in batch
+        self.num_motifs = 0
 
         # All start with zero padding so that indexing with zero padding returns zeros
         f_atoms = [[0] * self.atom_fdim]  # atom features
         f_bonds = [[0] * self.bond_fdim]  # combined atom/bond features
+        bond_only_fdim = self.bond_fdim - self.atom_fdim  # Pure bond features 
+        f_bond_only = [[0] * bond_only_fdim]
         a2b = [[]]  # mapping from atom index to incoming bond indices
         w_atoms = [0]  # mapping from atom index to vertex weight
         w_bonds = [0]  # mapping from bond index to edge weight
         b2a = [0]  # mapping from bond index to the index of the atom the bond is coming from
         b2revb = [0]  # mapping from bond index to the index of the reverse bond
+        
+        # Motif batch lists (NEW)
+        atom_to_motif_list = [-1]  # padding
+        interface_idx_list = []
+        motif_id_offset = 0
+        
         for mol_graph in mol_graphs:
             f_atoms.extend(mol_graph.f_atoms)
             f_bonds.extend(mol_graph.f_bonds)
+            f_bond_only.extend(mol_graph.f_bond_only)
             w_atoms.extend(mol_graph.w_atoms)
             w_bonds.extend(mol_graph.w_bonds)
 
@@ -798,12 +1124,55 @@ class BatchMolGraph:
             self.n_bonds += mol_graph.n_bonds
 
             self.degree_of_polym.append(mol_graph.degree_of_polym)
+            
+            # Concatenate motif assignments (NEW)
+            if mol_graph.atom_to_motif is not None:
 
+    # --------------------------------------------
+    # atom -> motif instance
+    # --------------------------------------------
+
+               atom_to_motif_list.extend(
+        (mol_graph.atom_to_motif + motif_id_offset).tolist()
+    )
+
+    # --------------------------------------------
+    # motif instance -> atoms
+    # --------------------------------------------
+
+               atom_offset = self.n_atoms - mol_graph.n_atoms
+
+               for local_id, atom_list in mol_graph.motif_to_atoms.items():
+
+                   global_id = local_id + motif_id_offset
+
+                   global_atoms = [
+                       atom + atom_offset
+                       for atom in atom_list
+                   ]
+
+                   self.motif_to_atoms_batch[global_id] = global_atoms
+
+                   self.motif_instance_type_batch[global_id] = \
+                   mol_graph.motif_instance_type[local_id]
+
+               motif_id_offset += mol_graph.num_motifs
+
+    # --------------------------------------------
+    # interface atoms
+    # --------------------------------------------
+
+               if mol_graph.interface_idx is not None and len(mol_graph.interface_idx) > 0:
+
+                  interface_idx_list.extend(
+                     (mol_graph.interface_idx + atom_offset).tolist()
+                  )
         self.max_num_bonds = max(1, max(
             len(in_bonds) for in_bonds in a2b))  # max with 1 to fix a crash in rare case of all single-heavy-atom mols
 
         self.f_atoms = torch.FloatTensor(f_atoms)
         self.f_bonds = torch.FloatTensor(f_bonds)
+        self.f_bond_only = torch.FloatTensor(f_bond_only)
         self.w_atoms = torch.FloatTensor(w_atoms)
         self.w_bonds = torch.FloatTensor(w_bonds)
         self.a2b = torch.LongTensor([a2b[a] + [0] * (self.max_num_bonds - len(a2b[a])) for a in range(self.n_atoms)])
@@ -811,6 +1180,27 @@ class BatchMolGraph:
         self.b2revb = torch.LongTensor(b2revb)
         self.b2b = None  # try to avoid computing b2b b/c O(n_atoms^3)
         self.a2a = None  # only needed if using atom messages
+        
+        # Convert motif tensors (NEW)
+        self.atom_to_motif_batch = torch.LongTensor(atom_to_motif_list)
+        self.interface_idx_batch = torch.LongTensor(interface_idx_list) if interface_idx_list else torch.LongTensor([])
+        self.num_motifs = motif_id_offset
+        
+        #print(
+    #f"[BatchMolGraph] "
+    #f"{len(mol_graphs)} molecules → "
+    #f"{self.n_atoms} atoms, "
+    #f"{self.num_motifs} motif instances, "
+    #f"{len(interface_idx_list)} interface atoms"
+#)
+
+        #for motif_id in sorted(self.motif_to_atoms_batch):
+
+            #print(
+        #f"  Instance {motif_id:2d} | "
+        #f"{self.motif_instance_type_batch[motif_id]:20s} | "
+        #f"{len(self.motif_to_atoms_batch[motif_id])} atoms"
+        #    )
 
     def get_components(self, atom_messages: bool = False) -> Tuple[torch.FloatTensor, torch.FloatTensor,
                                                                    torch.FloatTensor, torch.FloatTensor,
@@ -842,8 +1232,16 @@ class BatchMolGraph:
         else:
             f_bonds = self.f_bonds
 
-        return self.f_atoms, f_bonds, self.w_atoms, self.w_bonds, self.a2b, self.b2a, self.b2revb, \
+        return self.f_atoms, f_bonds, self.f_bond_only, self.w_atoms, self.w_bonds, self.a2b, self.b2a, self.b2revb, \
                self.a_scope, self.b_scope, self.degree_of_polym
+        
+        #print("\n========== INPUT ==========")
+        #print(f"f_atoms        : {f_atoms.shape}")
+        #print(f"f_bonds        : {f_bonds.shape}")
+        #print(f"f_bond_only    : {f_bond_only.shape}")
+        #print(f"a2b            : {a2b.shape}")
+        #print(f"b2a            : {b2a.shape}")
+        #print(f"b2revb         : {b2revb.shape}")
 
     def get_b2b(self) -> torch.LongTensor:
         """

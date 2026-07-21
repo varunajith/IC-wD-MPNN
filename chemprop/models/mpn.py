@@ -9,6 +9,7 @@ import torch.nn as nn
 from chemprop.args import TrainArgs
 from chemprop.features import BatchMolGraph, get_atom_fdim, get_bond_fdim, mol2graph
 from chemprop.nn_utils import index_select_ND, get_activation_function
+from chemprop.models.motif import MotifAttentionPooling, InterfaceEnrichment
 
 
 class MPNEncoder(nn.Module):
@@ -62,12 +63,35 @@ class MPNEncoder(nn.Module):
             self.atom_descriptors_size = args.atom_descriptors_size
             self.atom_descriptors_layer = nn.Linear(self.hidden_size + self.atom_descriptors_size,
                                                     self.hidden_size + self.atom_descriptors_size,)
+        
+        self.stage_split = self.depth // 2   # Split the message passing into two stages: 0 → K and K → D, where K = depth // 2
+        
+        # Motif-aware representation modules (NEW)
+        self.motif_pooling = MotifAttentionPooling(self.hidden_size)
+        self.interface_enrichment = InterfaceEnrichment(self.hidden_size)
+
+        ###############################################################################
+        # Stage III : Message re-initialization
+        ###############################################################################
+
+        bond_only_fdim = self.bond_fdim - self.atom_fdim
+
+        self.W_stage3 = nn.Linear(
+    self.hidden_size + bond_only_fdim,
+    self.hidden_size,
+    bias=self.bias
+    )
+       
+        #print("[MPNEncoder] Initialization successful")
+    
+    
+    
 
     def forward(self,
                 mol_graph: BatchMolGraph,
                 atom_descriptors_batch: List[np.ndarray] = None) -> torch.FloatTensor:
         """
-        Encodes a batch of molecular graphs.
+        Encodes a batch of molecular graphs with motif-aware mid-encoder abstraction.
 
         :param mol_graph: A :class:`~chemprop.features.featurization.BatchMolGraph` representing
                           a batch of molecular graphs.
@@ -75,14 +99,14 @@ class MPNEncoder(nn.Module):
         :return: A PyTorch tensor of shape :code:`(num_molecules, hidden_size)` containing the encoding of each molecule.
         """
         if atom_descriptors_batch is not None:
-            atom_descriptors_batch = [np.zeros([1, atom_descriptors_batch[0].shape[1]])] + atom_descriptors_batch   # padding the first with 0 to match the atom_hiddens
+            atom_descriptors_batch = [np.zeros([1, atom_descriptors_batch[0].shape[1]])] + atom_descriptors_batch
             atom_descriptors_batch = torch.from_numpy(np.concatenate(atom_descriptors_batch, axis=0)).float().to(self.device)
 
-        f_atoms, f_bonds, w_atoms, w_bonds, a2b, b2a, b2revb, \
+        f_atoms, f_bonds, f_bond_only, w_atoms, w_bonds, a2b, b2a, b2revb, \
         a_scope, b_scope, degree_of_polym = mol_graph.get_components(atom_messages=self.atom_messages)
 
-        f_atoms, f_bonds, w_atoms, w_bonds, a2b, b2a, b2revb = f_atoms.to(self.device), f_bonds.to(self.device), \
-                                                               w_atoms.to(self.device), w_bonds.to(self.device), \
+        f_atoms, f_bonds, f_bond_only, w_atoms, w_bonds, a2b, b2a, b2revb = f_atoms.to(self.device), f_bonds.to(self.device), \
+                                                               f_bond_only.to(self.device), w_atoms.to(self.device), w_bonds.to(self.device), \
                                                                a2b.to(self.device), b2a.to(self.device), \
                                                                b2revb.to(self.device)
 
@@ -91,56 +115,173 @@ class MPNEncoder(nn.Module):
 
         # Input
         if self.atom_messages:
-            input = self.W_i(f_atoms)  # num_atoms x hidden_size
+            input = self.W_i(f_atoms)
         else:
-            input = self.W_i(f_bonds)  # num_bonds x hidden_size
-        message = self.act_func(input)  # num_bonds x hidden_size
+            input = self.W_i(f_bonds)
+        message = self.act_func(input)
+        #print(f"Initial message : {message.shape}")   # debug
 
-        # Message passing
-        for depth in range(self.depth - 1):
+        K = self.stage_split  # Midpoint for motif pooling and interface enrichment
+
+        # ===== STAGE I: Message passing (0 → K) =====
+        #print(f"[MPNEncoder] Stage I: Message passing iterations 0 → {K} (midpoint)")
+        
+        for depth in range(K):
             if self.undirected:
                 message = (message + message[b2revb]) / 2
 
             if self.atom_messages:
-                nei_a_message = index_select_ND(message, a2a)  # num_atoms x max_num_bonds x hidden
-                nei_f_bonds = index_select_ND(f_bonds, a2b)  # num_atoms x max_num_bonds x bond_fdim
-                nei_message = torch.cat((nei_a_message, nei_f_bonds), dim=2)  # num_atoms x max_num_bonds x hidden + bond_fdim
-                message = nei_message.sum(dim=1)  # num_atoms x hidden + bond_fdim
+                nei_a_message = index_select_ND(message, a2a)
+                nei_f_bonds = index_select_ND(f_bonds, a2b)
+                nei_message = torch.cat((nei_a_message, nei_f_bonds), dim=2)
+                message = nei_message.sum(dim=1)
             else:
-                # m(a1 -> a2) = [sum_{a0 \in nei(a1)} m(a0 -> a1)] - m(a2 -> a1)
-                # message      a_message = sum(nei_a_message)      rev_message
-                nei_a_message = index_select_ND(message, a2b)  # num_atoms x max_num_bonds x hidden
-                nei_a_weight = index_select_ND(w_bonds, a2b)  # num_atoms x max_num_bonds
-                # weight nei_a_message based on edge weights
-                # m(a1 -> a2) = [sum_{a0 \in nei(a1)} m(a0 -> a1) * weight(a0 -> a1)] - m(a2 -> a1)
-                # message      a_message = dot(nei_a_message,nei_a_weight)      rev_message
-                nei_a_message = nei_a_message * nei_a_weight[..., None]  # num_atoms x max_num_bonds x hidden
-                a_message = nei_a_message.sum(dim=1)  # num_atoms x hidden
-                rev_message = message[b2revb]  # num_bonds x hidden
-                message = a_message[b2a] - rev_message  # num_bonds x hidden
+                nei_a_message = index_select_ND(message, a2b)
+                nei_a_weight = index_select_ND(w_bonds, a2b)
+                nei_a_message = nei_a_message * nei_a_weight[..., None]
+                a_message = nei_a_message.sum(dim=1)
+                rev_message = message[b2revb]
+                message = a_message[b2a] - rev_message
 
             message = self.W_h(message)
-            message = self.act_func(input + message)  # num_bonds x hidden_size
-            message = self.dropout_layer(message)  # num_bonds x hidden
+            message = self.act_func(input + message)
+            message = self.dropout_layer(message)
+        
+        message_K = message.clone()
 
+        #print(f"[MPNEncoder] Saved Stage-I message state: {message_K.shape}")  #debug
+
+
+        # ===== STAGE II: Motif pooling and interface enrichment =====
+        #print(f"[MPNEncoder] Stage II: Motif module application")
+        
+        # Compute intermediate atom embeddings H^(K)
         a2x = a2a if self.atom_messages else a2b
-        nei_a_message = index_select_ND(message, a2x)  # num_atoms x max_num_bonds x hidden
-        nei_a_weight = index_select_ND(w_bonds, a2x)  # num_atoms x max_num_bonds
-        # weight messages
-        nei_a_message = nei_a_message * nei_a_weight[..., None]  # num_atoms x max_num_bonds x hidden
-        a_message = nei_a_message.sum(dim=1)  # num_atoms x hidden
-        a_input = torch.cat([f_atoms, a_message], dim=1)  # num_atoms x (atom_fdim + hidden)
-        atom_hiddens = self.act_func(self.W_o(a_input))  # num_atoms x hidden
-        atom_hiddens = self.dropout_layer(atom_hiddens)  # num_atoms x hidden
+        nei_a_message = index_select_ND(message_K, a2x)
+        nei_a_weight = index_select_ND(w_bonds, a2x)
+        nei_a_message = nei_a_message * nei_a_weight[..., None]
+        a_message = nei_a_message.sum(dim=1)
+        a_input = torch.cat([f_atoms, a_message], dim=1)
+        atom_hiddens_K = self.act_func(self.W_o(a_input))
+        #print(f"atom_hiddens_K : {atom_hiddens_K.shape}")  #debug
+
+        # Apply motif/interface information
+        atom_to_motif = mol_graph.atom_to_motif_batch.to(self.device)
+        interface_idx = mol_graph.interface_idx_batch.to(self.device)
+
+        
+        if mol_graph.num_motifs > 0 and atom_to_motif.max().item() >= 0:
+            #print("\n========== MOTIFS ==========")           #debug
+            #print(f"num motifs     : {mol_graph.num_motifs}")
+            #print(f"atom_to_motif  : {atom_to_motif.shape}")
+            #print(f"interface_idx  : {interface_idx.shape}")
+            motif_h = self.motif_pooling(atom_hiddens_K, atom_to_motif, mol_graph.num_motifs)
+
+            # Zero-motif ablation
+            motif_h = torch.zeros_like(motif_h)  # purely ablation test to see if motif pooling is actually helping the model learn better representations
+            #print(f"motif_h        : {motif_h.shape}")       #debug
+            atom_hiddens_K_enriched = self.interface_enrichment(atom_hiddens_K, motif_h, atom_to_motif, interface_idx)
+            #print(f"[MPNEncoder] After enrichment: {atom_hiddens_K_enriched.shape}")  #debug
+        else:
+            atom_hiddens_K_enriched = atom_hiddens_K
+            print(f"[MPNEncoder] No motifs or interface atoms; skipping enrichment")
+        
+        
+        # ---------------------------------------------------------
+        # Update outgoing directed bond messages from interface atoms
+        # ---------------------------------------------------------
+
+        stage3_message = message_K.clone()
+      
+        
+
+        interface_mask = torch.zeros(
+                atom_hiddens_K_enriched.size(0),
+                dtype=torch.bool,
+                device=self.device
+                        )
+
+        interface_mask[interface_idx] = True
+
+        updated_bonds = 0
+
+        for bond_idx in range(1, stage3_message.shape[0]):
+
+            source_atom = b2a[bond_idx]
+
+            if not interface_mask[source_atom]:
+                continue
+
+            enriched_source = atom_hiddens_K_enriched[source_atom]
+            bond_feat = f_bond_only[bond_idx]
+
+            new_input = torch.cat([enriched_source, bond_feat], dim=0)
+
+            semantic_message = self.act_func(
+                self.W_stage3(new_input)
+            )
+
+            stage3_message[bond_idx] = semantic_message
+            updated_bonds += 1
+
+        #print(f"Updated {updated_bonds} directed bond messages.")   #debug    
+        stage3_input = stage3_message.clone()
+
+        message = stage3_message
+
+        #print("\n========== STAGE III ==========")          #debug
+        #print(f"stage3_message : {stage3_message.shape}")
+        #print(f"message        : {message.shape}")
+
+        #print("[MPNEncoder] Updated outgoing messages from interface atoms")    
+
+        # ===== STAGE III: Message passing (K → D) =====
+        #print(f"[MPNEncoder] Stage III: Message passing iterations {K} → {self.depth - 1}")
+        
+        for depth in range(K, self.depth - 1):
+            if self.undirected:
+                message = (message + message[b2revb]) / 2
+
+            if self.atom_messages:
+                nei_a_message = index_select_ND(message, a2a)
+                nei_f_bonds = index_select_ND(f_bonds, a2b)
+                nei_message = torch.cat((nei_a_message, nei_f_bonds), dim=2)
+                message = nei_message.sum(dim=1)
+            else:
+                nei_a_message = index_select_ND(message, a2b)
+                nei_a_weight = index_select_ND(w_bonds, a2b)
+                nei_a_message = nei_a_message * nei_a_weight[..., None]
+                a_message = nei_a_message.sum(dim=1)
+                rev_message = message[b2revb]
+                message = a_message[b2a] - rev_message
+
+            message = self.W_h(message)
+            message = self.act_func(stage3_input + message) # stage3_input can be changed to input here in this line to ensure that the original input is used for the final message passing stage - architecture control run
+            message = self.dropout_layer(message)
+        
+        #print(f"Final message  : {message.shape}")        #debug
+
+        # ===== Final atom aggregation =====
+        a2x = a2a if self.atom_messages else a2b
+        nei_a_message = index_select_ND(message, a2x)
+        nei_a_weight = index_select_ND(w_bonds, a2x)
+        nei_a_message = nei_a_message * nei_a_weight[..., None]
+        a_message = nei_a_message.sum(dim=1)
+        a_input = torch.cat([f_atoms, a_message], dim=1)
+        atom_hiddens = self.act_func(self.W_o(a_input))
+        atom_hiddens = self.dropout_layer(atom_hiddens)
+        
+        #print("\n========== OUTPUT ==========")          #debug
+        #print(f"atom_hiddens   : {atom_hiddens.shape}")
 
         # concatenate the atom descriptors
         if atom_descriptors_batch is not None:
             if len(atom_hiddens) != len(atom_descriptors_batch):
                 raise ValueError(f'The number of atoms is different from the length of the extra atom features')
 
-            atom_hiddens = torch.cat([atom_hiddens, atom_descriptors_batch], dim=1)     # num_atoms x (hidden + descriptor size)
-            atom_hiddens = self.atom_descriptors_layer(atom_hiddens)                    # num_atoms x (hidden + descriptor size)
-            atom_hiddens = self.dropout_layer(atom_hiddens)                             # num_atoms x (hidden + descriptor size)
+            atom_hiddens = torch.cat([atom_hiddens, atom_descriptors_batch], dim=1)
+            atom_hiddens = self.atom_descriptors_layer(atom_hiddens)
+            atom_hiddens = self.dropout_layer(atom_hiddens)
 
         # Readout
         mol_vecs = []
@@ -149,28 +290,23 @@ class MPNEncoder(nn.Module):
                 mol_vecs.append(self.cached_zero_vector)
             else:
                 cur_hiddens = atom_hiddens.narrow(0, a_start, a_size)
-                mol_vec = cur_hiddens  # (num_atoms, hidden_size)
+                mol_vec = cur_hiddens
                 w_atom_vec = w_atoms.narrow(0, a_start, a_size)
-                # if input are polymers, weight atoms from each repeating unit according to specified monomer fractions
-                # weight h by atom weights (weights are all 1 for non-polymer input)
                 mol_vec = w_atom_vec[..., None] * mol_vec
-                # weight each atoms at readout
                 if self.aggregation == 'mean':
-                    mol_vec = mol_vec.sum(dim=0) / w_atom_vec.sum(dim=0)  # if not --polymer, w_atom_vec.sum == a_size
+                    mol_vec = mol_vec.sum(dim=0) / w_atom_vec.sum(dim=0)
                 elif self.aggregation == 'sum':
                     mol_vec = mol_vec.sum(dim=0)
                 elif self.aggregation == 'norm':
                     mol_vec = mol_vec.sum(dim=0) / self.aggregation_norm
 
-                # if input are polymers, multiply mol vectors by degree of polymerization
-                # if not --polymer, Xn is 1
                 mol_vec = degree_of_polym[i] * mol_vec
-
                 mol_vecs.append(mol_vec)
 
-        mol_vecs = torch.stack(mol_vecs, dim=0)  # (num_molecules, hidden_size)
+        mol_vecs = torch.stack(mol_vecs, dim=0)
+        #print(f"[MPNEncoder] Final mol_vecs shape: {mol_vecs.shape}")
 
-        return mol_vecs  # num_molecules x hidden
+        return mol_vecs
 
 
 class MPN(nn.Module):
