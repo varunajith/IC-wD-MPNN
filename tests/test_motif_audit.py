@@ -23,7 +23,7 @@ INPUT_CSV = (
     / "all_folds_master_analysis.csv"
 )
 
-OUTPUT_CSV = "polymer_descriptors.csv"
+OUTPUT_CSV = "/Users/varun/Documents/polymer-chemprop/monomer_split_results_analysis/master_polymer_descriptors.csv"
 
 
 # ------------------------------------------------------------------

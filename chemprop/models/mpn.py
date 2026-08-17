@@ -68,11 +68,11 @@ class MPNEncoder(nn.Module):
         
         # Motif-aware representation modules (NEW)
         self.motif_pooling = MotifAttentionPooling(self.hidden_size)
-        self.interface_enrichment = InterfaceEnrichment(self.hidden_size)
+        self.interface_enrichment = InterfaceEnrichment(self.hidden_size, fusion_type="add") # or "mlp" for MLP fusion -> (Architecture control run for investigating dirrect motif addition vs an mlp fusion strategy)
 
         ###############################################################################
         # Stage III : Message re-initialization
-        ###############################################################################
+        ##############################################################################
 
         bond_only_fdim = self.bond_fdim - self.atom_fdim
 
@@ -178,13 +178,18 @@ class MPNEncoder(nn.Module):
             motif_h = self.motif_pooling(atom_hiddens_K, atom_to_motif, mol_graph.num_motifs)
 
             # Zero-motif ablation
-            motif_h = torch.zeros_like(motif_h)  # purely ablation test to see if motif pooling is actually helping the model learn better representations
+            #motif_h = torch.zeros_like(motif_h)  # purely ablation test to see if motif pooling is actually helping the model learn better representations
             #print(f"motif_h        : {motif_h.shape}")       #debug
             atom_hiddens_K_enriched = self.interface_enrichment(atom_hiddens_K, motif_h, atom_to_motif, interface_idx)
             #print(f"[MPNEncoder] After enrichment: {atom_hiddens_K_enriched.shape}")  #debug
         else:
             atom_hiddens_K_enriched = atom_hiddens_K
-            print(f"[MPNEncoder] No motifs or interface atoms; skipping enrichment")
+            #print(f"[MPNEncoder] No motifs or interface atoms; skipping enrichment")
+        
+       
+        
+        
+      
         
         
         # ---------------------------------------------------------

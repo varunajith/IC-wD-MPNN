@@ -75,19 +75,21 @@ class InterfaceEnrichment(nn.Module):
     with the motif representation to which they belong.
     """
 
-    def __init__(self, hidden_size: int):
+    def __init__(self, hidden_size: int, fusion_type="mlp"):
         """
         :param hidden_size: Dimensionality of atom/motif embeddings.
+        :param fusion_type: Type of fusion to use ("mlp" or "add").
         """
         super(InterfaceEnrichment, self).__init__()
         self.hidden_size = hidden_size
-        # Fusion: concatenate atom embedding and motif embedding, then project
-        self.fusion = nn.Sequential(
-    nn.Linear(2 * hidden_size, hidden_size),
-    nn.ReLU(),
-    nn.Linear(hidden_size, hidden_size)
-        )
-
+       
+        self.fusion_type = fusion_type
+        if self.fusion_type == "mlp":
+            self.fusion = nn.Sequential(
+                                nn.Linear(2 * hidden_size, hidden_size),
+                                nn.ReLU(),
+                                nn.Linear(hidden_size, hidden_size)
+                                    )
     def forward(self,
                 atom_hiddens: torch.Tensor,
                 motif_hiddens: torch.Tensor,
@@ -113,11 +115,20 @@ class InterfaceEnrichment(nn.Module):
             motif_id = atom_to_motif[intf_atom_idx]
             atom_emb = atom_hiddens[intf_atom_idx]      # (hidden_size,)
             motif_emb = motif_hiddens[motif_id]         # (hidden_size,)
-            
+
+            if self.fusion_type == "mlp":
             # Concatenate and project
-            fused = torch.cat([atom_emb, motif_emb], dim=0)  # (hidden_size*2,)
-            enriched = self.fusion(fused)                     # (hidden_size,)
-            updated_hiddens[intf_atom_idx] = atom_emb + enriched
+                fused = torch.cat([atom_emb, motif_emb], dim=0)  # (hidden_size*2,)
+                enriched = self.fusion(fused)                    #(hidden_size,)
+                updated = atom_emb + enriched 
+
+            elif self.fusion_type == "add":
+                updated = atom_emb + motif_emb
+
+            else:
+                raise ValueError(f"Unknown fusion_type: {self.fusion_type}")
+            
+            updated_hiddens[intf_atom_idx] = updated
 
         #print(f"[InterfaceEnrichment] Enriched {interface_idx.shape[0]} interface atoms. "
               #f"atom_hiddens: {atom_hiddens.shape} → updated_hiddens: {updated_hiddens.shape}")
