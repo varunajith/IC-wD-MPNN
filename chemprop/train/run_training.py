@@ -10,6 +10,8 @@ import torch
 from tqdm import trange
 from torch.optim.lr_scheduler import ExponentialLR
 
+from chemprop import args
+
 from .evaluate import evaluate, evaluate_predictions
 from .predict import predict
 from .train import train
@@ -92,6 +94,9 @@ def run_training(args: TrainArgs,
                                                      args=args,
                                                      logger=logger)
 
+
+    args.train_data_size = len(train_data)
+
     if args.dataset_type == 'classification':
         class_sizes = get_class_sizes(data)
         debug('Class sizes')
@@ -133,10 +138,6 @@ def run_training(args: TrainArgs,
     else:
         bond_feature_scaler = None
 
-    args.train_data_size = len(train_data)
-
-    debug(f'Total size = {len(data):,} | '
-          f'train size = {len(train_data):,} | val size = {len(val_data):,} | test size = {len(test_data):,}')
 
     # Initialize scaler and scale training targets by subtracting mean and dividing standard deviation (regression only)
     if args.dataset_type == 'regression':
@@ -216,20 +217,20 @@ def run_training(args: TrainArgs,
         else:
             debug(f'Building model {model_idx}')
             model = MoleculeModel(args)
-            
+
         # Optionally, overwrite weights:
         if args.checkpoint_frzn is not None:
             debug(f'Loading and freezing parameters from {args.checkpoint_frzn}.')
-            model = load_frzn_model(model=model,path=args.checkpoint_frzn, current_args=args, logger=logger)     
-        
+            model = load_frzn_model(model=model,path=args.checkpoint_frzn, current_args=args, logger=logger)
+
         debug(model)
-        
+
         if args.checkpoint_frzn is not None:
             debug(f'Number of unfrozen parameters = {param_count(model):,}')
             debug(f'Total number of parameters = {param_count_all(model):,}')
         else:
             debug(f'Number of parameters = {param_count_all(model):,}')
-        
+
         if args.cuda:
             debug('Moving model to cuda')
         model = model.to(args.device)

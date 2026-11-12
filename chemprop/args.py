@@ -264,6 +264,7 @@ class TrainArgs(CommonArgs):
     """
     pytorch_seed: int = 0
     """Seed for PyTorch randomness (e.g., random initial weights)."""
+
     metric: Metric = None
     """
     Metric to use during evaluation. It is also used with the validation set for early stopping.
@@ -379,7 +380,7 @@ class TrainArgs(CommonArgs):
     """
 
     # Training arguments
-    epochs: int = 30
+    epochs: int = 3
     """Number of epochs to run."""
     warmup_epochs: float = 2.0
     """

@@ -63,29 +63,25 @@ class MPNEncoder(nn.Module):
             self.atom_descriptors_size = args.atom_descriptors_size
             self.atom_descriptors_layer = nn.Linear(self.hidden_size + self.atom_descriptors_size,
                                                     self.hidden_size + self.atom_descriptors_size,)
-        
-        self.stage_split = self.depth // 2   # Split the message passing into two stages: 0 → K and K → D, where K = depth // 2
-        
-        # Motif-aware representation modules (NEW)
-        self.motif_pooling = MotifAttentionPooling(self.hidden_size)
-        self.interface_enrichment = InterfaceEnrichment(self.hidden_size, fusion_type="add") # or "mlp" for MLP fusion -> (Architecture control run for investigating dirrect motif addition vs an mlp fusion strategy)
 
-        ###############################################################################
-        # Stage III : Message re-initialization
-        ##############################################################################
+        self.stage_split = self.depth // 2   # Split the message passing into two stages: 0 → K-1 and K → D-1, where K = depth // 2
+
+        # Motif-aware representation modules
+        self.motif_pooling = MotifAttentionPooling(self.hidden_size, pooling_type="attention")  # "mean" for mean pooling and "attention" for attention pooling
+        self.interface_enrichment = InterfaceEnrichment(self.hidden_size, fusion_type="add")
+
+
+        # Stage III : Bond message re-initialization
 
         bond_only_fdim = self.bond_fdim - self.atom_fdim
 
         self.W_stage3 = nn.Linear(
-    self.hidden_size + bond_only_fdim,
-    self.hidden_size,
-    bias=self.bias
-    )
-       
-        #print("[MPNEncoder] Initialization successful")
-    
-    
-    
+        self.hidden_size + bond_only_fdim,
+        self.hidden_size,
+        bias=self.bias
+        )
+
+
 
     def forward(self,
                 mol_graph: BatchMolGraph,
@@ -119,13 +115,11 @@ class MPNEncoder(nn.Module):
         else:
             input = self.W_i(f_bonds)
         message = self.act_func(input)
-        #print(f"Initial message : {message.shape}")   # debug
 
         K = self.stage_split  # Midpoint for motif pooling and interface enrichment
 
         # ===== STAGE I: Message passing (0 → K) =====
-        #print(f"[MPNEncoder] Stage I: Message passing iterations 0 → {K} (midpoint)")
-        
+
         for depth in range(K):
             if self.undirected:
                 message = (message + message[b2revb]) / 2
@@ -146,15 +140,12 @@ class MPNEncoder(nn.Module):
             message = self.W_h(message)
             message = self.act_func(input + message)
             message = self.dropout_layer(message)
-        
-        message_K = message.clone()
 
-        #print(f"[MPNEncoder] Saved Stage-I message state: {message_K.shape}")  #debug
+        message_K = message.clone()
 
 
         # ===== STAGE II: Motif pooling and interface enrichment =====
-        #print(f"[MPNEncoder] Stage II: Motif module application")
-        
+
         # Compute intermediate atom embeddings H^(K)
         a2x = a2a if self.atom_messages else a2b
         nei_a_message = index_select_ND(message_K, a2x)
@@ -163,42 +154,39 @@ class MPNEncoder(nn.Module):
         a_message = nei_a_message.sum(dim=1)
         a_input = torch.cat([f_atoms, a_message], dim=1)
         atom_hiddens_K = self.act_func(self.W_o(a_input))
-        #print(f"atom_hiddens_K : {atom_hiddens_K.shape}")  #debug
 
         # Apply motif/interface information
         atom_to_motif = mol_graph.atom_to_motif_batch.to(self.device)
         interface_idx = mol_graph.interface_idx_batch.to(self.device)
 
-        
-        if mol_graph.num_motifs > 0 and atom_to_motif.max().item() >= 0:
-            #print("\n========== MOTIFS ==========")           #debug
-            #print(f"num motifs     : {mol_graph.num_motifs}")
-            #print(f"atom_to_motif  : {atom_to_motif.shape}")
-            #print(f"interface_idx  : {interface_idx.shape}")
-            motif_h = self.motif_pooling(atom_hiddens_K, atom_to_motif, mol_graph.num_motifs)
 
-            # Zero-motif ablation
-            #motif_h = torch.zeros_like(motif_h)  # purely ablation test to see if motif pooling is actually helping the model learn better representations
-            #print(f"motif_h        : {motif_h.shape}")       #debug
-            atom_hiddens_K_enriched = self.interface_enrichment(atom_hiddens_K, motif_h, atom_to_motif, interface_idx)
-            #print(f"[MPNEncoder] After enrichment: {atom_hiddens_K_enriched.shape}")  #debug
+        if mol_graph.num_motifs > 0 and atom_to_motif.max().item() >= 0:
+
+            motif_h = self.motif_pooling(
+                    atom_hiddens_K,
+                    atom_to_motif,
+                    mol_graph.num_motifs
+            )
+
+            atom_hiddens_K_enriched = self.interface_enrichment(
+                atom_hiddens_K,
+                motif_h,
+                atom_to_motif,
+                interface_idx
+            )
+
         else:
+
             atom_hiddens_K_enriched = atom_hiddens_K
-            #print(f"[MPNEncoder] No motifs or interface atoms; skipping enrichment")
-        
-       
-        
-        
-      
-        
-        
+
+
+
         # ---------------------------------------------------------
         # Update outgoing directed bond messages from interface atoms
         # ---------------------------------------------------------
 
         stage3_message = message_K.clone()
-      
-        
+
 
         interface_mask = torch.zeros(
                 atom_hiddens_K_enriched.size(0),
@@ -207,8 +195,6 @@ class MPNEncoder(nn.Module):
                         )
 
         interface_mask[interface_idx] = True
-
-        updated_bonds = 0
 
         for bond_idx in range(1, stage3_message.shape[0]):
 
@@ -227,22 +213,14 @@ class MPNEncoder(nn.Module):
             )
 
             stage3_message[bond_idx] = semantic_message
-            updated_bonds += 1
 
-        #print(f"Updated {updated_bonds} directed bond messages.")   #debug    
         stage3_input = stage3_message.clone()
 
         message = stage3_message
 
-        #print("\n========== STAGE III ==========")          #debug
-        #print(f"stage3_message : {stage3_message.shape}")
-        #print(f"message        : {message.shape}")
 
-        #print("[MPNEncoder] Updated outgoing messages from interface atoms")    
+        # ===== STAGE III: Message passing (K → D-1) =====
 
-        # ===== STAGE III: Message passing (K → D) =====
-        #print(f"[MPNEncoder] Stage III: Message passing iterations {K} → {self.depth - 1}")
-        
         for depth in range(K, self.depth - 1):
             if self.undirected:
                 message = (message + message[b2revb]) / 2
@@ -261,10 +239,8 @@ class MPNEncoder(nn.Module):
                 message = a_message[b2a] - rev_message
 
             message = self.W_h(message)
-            message = self.act_func(stage3_input + message) # stage3_input can be changed to input here in this line to ensure that the original input is used for the final message passing stage - architecture control run
+            message = self.act_func(stage3_input + message)
             message = self.dropout_layer(message)
-        
-        #print(f"Final message  : {message.shape}")        #debug
 
         # ===== Final atom aggregation =====
         a2x = a2a if self.atom_messages else a2b
@@ -275,9 +251,7 @@ class MPNEncoder(nn.Module):
         a_input = torch.cat([f_atoms, a_message], dim=1)
         atom_hiddens = self.act_func(self.W_o(a_input))
         atom_hiddens = self.dropout_layer(atom_hiddens)
-        
-        #print("\n========== OUTPUT ==========")          #debug
-        #print(f"atom_hiddens   : {atom_hiddens.shape}")
+
 
         # concatenate the atom descriptors
         if atom_descriptors_batch is not None:
@@ -309,7 +283,6 @@ class MPNEncoder(nn.Module):
                 mol_vecs.append(mol_vec)
 
         mol_vecs = torch.stack(mol_vecs, dim=0)
-        #print(f"[MPNEncoder] Final mol_vecs shape: {mol_vecs.shape}")
 
         return mol_vecs
 

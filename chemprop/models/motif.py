@@ -1,5 +1,5 @@
 """
-Motif-aware representation learning for WD-MPNN.
+Motif-aware representation learning for wD-MPNN.
 
 Modules for computing motif embeddings and enriching interface atoms.
 """
@@ -15,19 +15,39 @@ class MotifAttentionPooling(nn.Module):
     Given atom embeddings and their motif assignments, computes a learnable
     attention-weighted representation for each motif.
     """
+    """
+    Supports:
+    - "attention": learnable attention-weighted pooling
+    - "mean": simple mean pooling
+    """
 
-    def __init__(self, hidden_size: int):
+
+    def __init__(self, hidden_size: int, pooling_type: str = "attention"):
         """
         :param hidden_size: Dimensionality of atom/motif embeddings.
+        :param pooling_type: Pooling method ("attention" or "mean").
         """
         super(MotifAttentionPooling, self).__init__()
         self.hidden_size = hidden_size
+        self.pooling_type = pooling_type
+
         # Learnable attention weights for pooling
-        self.attention = nn.Sequential(
-    nn.Linear(hidden_size, hidden_size),
-    nn.Tanh(),
-    nn.Linear(hidden_size, 1, bias=False),
-       )
+        if self.pooling_type == "attention":
+            self.attention = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size),
+                nn.Tanh(),
+                nn.Linear(hidden_size, 1, bias=False),
+            )
+
+        elif self.pooling_type == "mean":
+            self.attention = None
+
+        else:
+            raise ValueError(
+                f"Unknown pooling_type: {self.pooling_type}. "
+                f"Expected 'attention' or 'mean'."
+            )
+
 
     def forward(self,
                 atom_hiddens: torch.Tensor,
@@ -35,7 +55,7 @@ class MotifAttentionPooling(nn.Module):
                 num_motifs: int,
                 ) -> torch.Tensor:
         """
-        Compute motif embeddings via attention pooling.
+        Compute motif embeddings via attention or mean pooling.
 
         :param atom_hiddens: Atom embeddings, shape (num_atoms, hidden_size)
         :param atom_to_motif: Motif assignment per atom, shape (num_atoms,), dtype=LongTensor
@@ -46,23 +66,28 @@ class MotifAttentionPooling(nn.Module):
         # Initialize motif embeddings
         motif_hiddens = torch.zeros(num_motifs, self.hidden_size, device=atom_hiddens.device)
 
+        # Attention pooling
+        if self.pooling_type == "attention":
         # Compute attention logits
-        attn_logits = self.attention(atom_hiddens)  # (num_atoms, 1)
+            attn_logits = self.attention(atom_hiddens)  # (num_atoms, 1)
         
-        # Gather atoms by motif and apply attention pooling
+        # Gather atoms by motif and apply attention or mean pooling
         for motif_id in range(num_motifs):
             mask = (atom_to_motif == motif_id)
             if not mask.any():
                 continue
             
             motif_atoms = atom_hiddens[mask]  # (motif_size, hidden_size)
-            attention_scores = attn_logits[mask]    # (motif_size, 1)
-            attention_weights = torch.softmax(attention_scores, dim=0)  # (motif_size, 1)
-            
-            # Attention Weighted pooling
-            motif_hiddens[motif_id] = (attention_weights * motif_atoms).sum(dim=0)  # (hidden_size,)
+            if self.pooling_type == "attention":
 
-        #print(f"[MotifPooling] atom_hiddens: {atom_hiddens.shape} → motif_hiddens: {motif_hiddens.shape}")
+                attention_scores = attn_logits[mask]    # (motif_size, 1)
+                attention_weights = torch.softmax(attention_scores, dim=0)  # (motif_size, 1)
+                # Attention Weighted pooling
+                motif_hiddens[motif_id] = (attention_weights * motif_atoms).sum(dim=0)  # (hidden_size,)
+
+            elif self.pooling_type == "mean":
+                motif_hiddens[motif_id] = motif_atoms.mean(dim=0)
+
         
         return motif_hiddens
 
@@ -130,7 +155,5 @@ class InterfaceEnrichment(nn.Module):
             
             updated_hiddens[intf_atom_idx] = updated
 
-        #print(f"[InterfaceEnrichment] Enriched {interface_idx.shape[0]} interface atoms. "
-              #f"atom_hiddens: {atom_hiddens.shape} → updated_hiddens: {updated_hiddens.shape}")
         
         return updated_hiddens

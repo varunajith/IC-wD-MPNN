@@ -9,7 +9,6 @@ import torch
 import numpy as np
 
 from chemprop.rdkit import make_mol, make_polymer_mol
-from chemprop.features.polymer_motifs import POLYMER_MOTIFS
 
 
 class Featurization_parameters:
@@ -401,11 +400,6 @@ class MolGraph:
         self.is_explicit_h = is_explicit_h()
         self.is_adding_hs = is_adding_hs()
         self.reaction_mode = reaction_mode()
-        #print("=" * 60)
-        #print("MolGraph constructor")
-        #print("self.is_polymer =", self.is_polymer)
-        #print("type(mol) =", type(mol))
-        #print("=" * 60)
         
         # Convert SMILES to RDKit molecule if necessary
         if type(mol) == str:
@@ -765,277 +759,372 @@ class MolGraph:
                     self.n_bonds += 2
         
         # ================================
-        # Motif-aware representation (NEW)
+        # Motif-aware representation
         # ================================
         self._assign_motifs()
 
+
     def _assign_motifs(self) -> None:
         """
-        Assign atoms to polymer-specific motifs using enhanced SMARTS patterns.
-        
-        Motif categories (priority order):
-        - 10: ester (C(=O)-O-C)
-        - 9:  amide (C(=O)-N)
-        - 8:  carbonyl (C=O)
-        - 7:  ether (C-O-C)
-        - 6:  amine (C-N-C)
-        - 5:  sulfur-containing (S, thioether, sulfone)
-        - 4:  aromatic (C in aromatic ring)
-        - 3:  secondary carbon (C with H)
-        - 2:  primary carbon (C with multiple H)
-        - 1:  quaternary carbon (C-C-C-C)
-        - 0:  default backbone carbon
+        Assign atoms to the fixed polymer motif vocabulary.
+
+        Assignment order
+        ----------------
+        1. Fixed Murcko scaffold vocabulary
+        - 112 predefined scaffolds
+        - searched in largest -> smallest order
+        - scaffold matches claim all of their atoms
+        - overlapping smaller scaffold matches are rejected
+
+        2. Functional-group vocabulary
+        - searched after scaffold assignment
+        - only completely unclaimed functional-group matches are assigned
+
+        3. Halogen motifs
+        - represented as individual F/Cl/Br/I atoms
+        - not as C-X bonds
+
+        4. Remaining connected atoms
+        - grouped into connected backbone fragments
+
+        Every atom belongs to at most one motif instance.
         """
+
         from rdkit import Chem
-        
-        # =====================================================
+        import numpy as np
+
+        from chemprop.features.polymer_motifs_v2 import (
+        SCAFFOLD_MOTIFS,
+        FUNCTIONAL_MOTIFS,
+        )
+
+        # ============================================================
         # Motif bookkeeping
-        # =====================================================
+        # ============================================================
 
-# atom index -> motif instance id
-        self.atom_to_motif = np.full(self.n_atoms, -1, dtype=np.int64)
+        self.atom_to_motif = np.full(
+        self.n_atoms,
+        -1,
+        dtype=np.int64
+        )
 
-# motif instance -> list of atom indices
         self.motif_to_atoms = {}
-
-# motif instance -> motif type
         self.motif_instance_type = {}
 
         interface_atoms = []
-        
-        # Get molecule reference for pattern matching
-        #print("\n========== _assign_motifs DEBUG ==========")
-        #print("self.is_polymer:", self.is_polymer)
-        #print("self.n_atoms:", self.n_atoms)
-        #print("has polymer_info:", hasattr(self, "polymer_info"))
-        #print("polymer_info:", self.polymer_info)
-        #print("has rwmol:", hasattr(self, "rwmol"))
-        #if hasattr(self, "rwmol"):
-           #print("rwmol type:", type(self.rwmol))
-           #print("rwmol atoms:", self.rwmol.GetNumAtoms())
-        #print("=========================================\n")
-        mol_to_match = None
-        if self.is_polymer and hasattr(self, 'polymer_info'):
-            # Polymer mode: use rwmol (RWMol from tag_atoms_in_repeating_unit)
-            # atoms are already filtered to 'core' atoms only
-            mol_to_match = getattr(self, 'rwmol', None)
+
+        # ============================================================
+        # Select molecule used for motif matching
+        # ============================================================
+
+        if self.is_polymer and hasattr(self, "polymer_info"):
+            mol_to_match = getattr(self, "rwmol", None)
         else:
-            # Non-polymer mode: use regular molecule
-            mol_to_match = getattr(self, 'mol', None)
-        
-        if mol_to_match is not None and self.n_atoms > 0:
-            # Pre-process: compile patterns
-            assigned = np.zeros(self.n_atoms, dtype=bool)
+            mol_to_match = getattr(self, "mol", None)
 
-            instance_id = 0
+        if mol_to_match is None or self.n_atoms == 0:
 
-            for motif in POLYMER_MOTIFS:
+            self.atom_to_motif = np.zeros(
+                self.n_atoms,
+                dtype=np.int64
+            )
 
-    # -------------------------------------------------
-    # SMARTS motifs
-    # -------------------------------------------------
+            self.num_motifs = 1 if self.n_atoms > 0 else 0
 
-                if motif.detector == "smarts":
+            if self.n_atoms > 0:
+                self.motif_to_atoms = {
+                0: list(range(self.n_atoms))
+                }
 
-                   if motif.smarts is None:
-                       continue
+                self.motif_instance_type = {
+                0: "backbone"
+                }
 
-                   pattern = Chem.MolFromSmarts(motif.smarts)
+            self.interface_idx = np.array(
+                [],
+                dtype=np.int64
+            )
 
-                   if pattern is None:
-                      continue
+            return
 
-                   try:
+        # ============================================================
+        # Assignment state
+        # ============================================================
 
-                       matches = mol_to_match.GetSubstructMatches(pattern)
+        assigned = np.zeros(
+            self.n_atoms,
+            dtype=bool
+        )
 
-                   except Exception as e:
+        instance_id = 0
 
-                       print(f"[MolGraph] SMARTS failed for {motif.name}: {e}")
-                       continue
+        # ============================================================
+        # Helper: create motif instance
+        # ============================================================
 
-                   for match in matches:
+        def add_motif_instance(
+            atom_indices,
+            motif_type,
+        ):
+            nonlocal instance_id
 
-                       atoms = []
+            atom_indices = list(atom_indices)
 
-                       for atom_idx in match:
+            self.motif_to_atoms[instance_id] = atom_indices
 
-                           if atom_idx >= self.n_atoms:
-                              continue
+            self.motif_instance_type[instance_id] = motif_type
 
-                           if assigned[atom_idx]:
-                              continue
+            for atom_idx in atom_indices:
 
-                           atoms.append(atom_idx)
+                self.atom_to_motif[atom_idx] = instance_id
+                assigned[atom_idx] = True
 
-                       if len(atoms) == 0:
-                              continue
+            instance_id += 1
 
-                       self.motif_to_atoms[instance_id] = atoms
+        # ============================================================
+        # Helper: obtain unique atom-set matches
+        # ============================================================
 
-                       self.motif_instance_type[instance_id] = motif.name
+        def unique_matches(pattern):
 
-                       for atom_idx in atoms:
+            try:
+                raw_matches = mol_to_match.GetSubstructMatches(
+                    pattern,
+                    uniquify=True
+                )
 
-                           self.atom_to_motif[atom_idx] = instance_id
-                           assigned[atom_idx] = True
+            except Exception as e:
 
-                       instance_id += 1
+                print(
+                f"[MolGraph] Substructure matching failed: {e}"
+                )
 
-   # -------------------------------------------------
-# Aromatic systems (connected aromatic components)
-# -------------------------------------------------
+                return []
 
-                elif motif.detector == "rdkit_ring":
+            unique = []
+            seen = set()
 
-                    aromatic_atoms = {
-                        atom.GetIdx()
-                        for atom in mol_to_match.GetAtoms()
-                        if atom.GetIsAromatic()
-                    }
+            for match in raw_matches:
 
-                    visited = set()
+                atom_set = tuple(sorted(set(match)))
 
-                    for start in aromatic_atoms:
+                if atom_set in seen:
+                    continue
 
-                        if start in visited:
-                            continue
+                seen.add(atom_set)
+                unique.append(atom_set)
 
-                        stack = [start]
-                        component = []
+            return unique
 
-                        while stack:
+        # ============================================================
+        # STAGE 1
+        # Fixed Murcko scaffold vocabulary
+        # ============================================================
 
-                            current = stack.pop()
+        for scaffold in SCAFFOLD_MOTIFS:
 
-                            if current in visited:
-                                continue
+            query = Chem.MolFromSmiles(
+                scaffold.smiles
+            )
 
-                            visited.add(current)
-                            component.append(current)
+            if query is None:
+                raise ValueError(
+                    f"Invalid scaffold SMILES: "
+                    f"{scaffold.smiles}"
+                )
 
-                            atom = mol_to_match.GetAtomWithIdx(current)
+            matches = unique_matches(query)
 
-                            for nbr in atom.GetNeighbors():
+            for match in matches:
 
-                                j = nbr.GetIdx()
+                # ----------------------------------------------------
+                # A scaffold is assigned as a complete unit.
+                #
+                # If even one atom has already been claimed,
+                # this overlapping match is rejected.
+                # ----------------------------------------------------
 
-                                if (
-                                    j in aromatic_atoms
-                                    and j not in visited
-                                ):
-                                    stack.append(j)
+                if any(
+                    assigned[atom_idx]
+                    for atom_idx in match
+                ):
+                    continue
 
-                        atoms = [
-                            idx for idx in component
-                            if not assigned[idx]
-                        ]
+                add_motif_instance(
+                    match,
+                    scaffold.name
+                )
 
-                        if len(atoms) == 0:
-                            continue
 
-                        self.motif_to_atoms[instance_id] = atoms
-                        self.motif_instance_type[instance_id] = motif.name
+        # ============================================================
+        # STAGE 2
+        # Functional-group vocabulary
+        # ============================================================
 
-                        for atom_idx in atoms:
-                            self.atom_to_motif[atom_idx] = instance_id
-                            assigned[atom_idx] = True
+        functional_motifs = sorted(
+            FUNCTIONAL_MOTIFS,
+            key=lambda motif: motif.priority,
+            reverse=True
+        )
 
-                        instance_id += 1
-# -------------------------------------------------
-# Remaining atoms -> connected backbone fragments
-# -------------------------------------------------
+        for motif in functional_motifs:
 
-            remaining = set(np.where(~assigned)[0].tolist())
+            if motif.smarts is None:
+                continue
 
-            while remaining:
+            pattern = Chem.MolFromSmarts(
+                motif.smarts
+            )
 
-    # Start one connected component
-                start = remaining.pop()
+            if pattern is None:
 
-                component = [start]
+                raise ValueError(
+                    f"Invalid SMARTS for motif "
+                    f"'{motif.name}': {motif.smarts}"
+                )
 
-                queue = [start]
+            matches = unique_matches(pattern)
 
-                while queue:
+            for match in matches:
 
-                    atom_idx = queue.pop()
+                # ----------------------------------------------------
+                # Functional groups are also assigned as complete
+                # motif instances.
+                # They cannot partially overlap another motif.
+                # ----------------------------------------------------
 
-                    atom = mol_to_match.GetAtomWithIdx(atom_idx)
+                if any(
+                    assigned[atom_idx]
+                    for atom_idx in match
+                ):
+                    continue
 
-                    for nbr in atom.GetNeighbors():
+                add_motif_instance(
+                    match,
+                    motif.name
+                )
 
-                        nbr_idx = nbr.GetIdx()
+        # ============================================================
+        # STAGE 3
+        # Remaining atoms -> connected backbone fragments
+        # ============================================================
 
-                        if nbr_idx in remaining:
+        remaining = set(
+            np.where(~assigned)[0].tolist()
+        )
 
-                            remaining.remove(nbr_idx)
+        while remaining:
 
-                            component.append(nbr_idx)
+            start = remaining.pop()
 
-                            queue.append(nbr_idx)
+            component = [start]
 
-    # Create one backbone motif instance
-                self.motif_to_atoms[instance_id] = component
+            queue = [start]
 
-                self.motif_instance_type[instance_id] = "backbone"
+            while queue:
 
-                for atom_idx in component:
+                atom_idx = queue.pop()
 
-                    self.atom_to_motif[atom_idx] = instance_id
+                atom = mol_to_match.GetAtomWithIdx(
+                    atom_idx
+                )
 
-                    assigned[atom_idx] = True
+                for neighbor in atom.GetNeighbors():
 
-                instance_id += 1
+                    neighbor_idx = neighbor.GetIdx()
 
-            self.num_motifs = instance_id
+                    if neighbor_idx in remaining:
 
-            #print(
-    #f"[MolGraph] Created {self.num_motifs} motif instances"
-#)
+                        remaining.remove(
+                            neighbor_idx
+                        )
 
-            #for idx in range(self.num_motifs):
+                        component.append(
+                            neighbor_idx
+                        )
 
-                #print(
-    #f"  Instance {idx:2d} | "
-    #f"{self.motif_instance_type[idx]:20s} | "
-    #f"{len(self.motif_to_atoms[idx])} atoms | "
-    #f"{self.motif_to_atoms[idx]}"
-#)
-        else:
-            # Fallback: single motif for all atoms
-            self.atom_to_motif = np.zeros(self.n_atoms, dtype=np.int64)
-            self.num_motifs = 1
-            print(f"[MolGraph] Motif assignment (fallback): {self.n_atoms} atoms → 1 motif (backbone only)")
-        
-        # ====================================
-        # Extract interface atoms
-        # ====================================
-        if self.is_polymer and hasattr(self, 'polymer_info') and self.polymer_info:
-            # polymer_info: list of (r1, r2, w_bond12, w_bond21) tuples
-            # r1, r2 are attachment indices like 1, 2, etc.
-            # Find atoms marked as attachment points
-            
-            # Strategy: iterate through polymer_info entries and find corresponding atoms
-            # In the rwmol, attachment atoms should be accessible via properties
-            if hasattr(self, 'rwmol'):
+                        queue.append(
+                            neighbor_idx
+                        )
+
+            add_motif_instance(
+                component,
+                "backbone"
+            )
+
+        # ============================================================
+        # Final motif count
+        # ============================================================
+
+        self.num_motifs = instance_id
+
+        # ============================================================
+        # Extract polymer interface atoms
+        #
+        # KEEPING EXISTING ALDEGHI INTERFACE LOGIC
+        # ============================================================
+
+        if (
+            self.is_polymer
+            and hasattr(self, "polymer_info")
+            and self.polymer_info
+        ):
+
+            if hasattr(self, "rwmol"):
+
                 for atom in self.rwmol.GetAtoms():
-                    if atom.HasProp('R'):
-                        r_prop = atom.GetProp('R')
-                        # Check if this R group is in polymer_info
-                        for r1, r2, _, _ in self.polymer_info:
-                            if f'*{r1}' == r_prop or f'*{r2}' == r_prop:
-                                atom_idx = atom.GetIdx()
-                                if 0 <= atom_idx < self.n_atoms:
-                                    interface_atoms.append(atom_idx)
-        
-        # Fallback if no interface atoms found but polymer
-        if self.is_polymer and len(interface_atoms) == 0 and self.polymer_info:
-            # Heuristic: first few atoms are likely interface atoms
-            interface_atoms = list(range(min(len(self.polymer_info) * 2, max(1, self.n_atoms // 4))))
-        
-        self.interface_idx = np.array(sorted(set(interface_atoms)), dtype=np.int64)
-        #print(f"[MolGraph] Interface atoms: {len(self.interface_idx)} atoms {list(self.interface_idx)[:5]}{'...' if len(self.interface_idx) > 5 else ''}")
+
+                    if not atom.HasProp("R"):
+                        continue
+
+                    r_prop = atom.GetProp("R")
+
+                    for r1, r2, _, _ in self.polymer_info:
+
+                        if (
+                            f"*{r1}" == r_prop
+                            or f"*{r2}" == r_prop
+                        ):
+
+                            atom_idx = atom.GetIdx()
+
+                            if (
+                                0 <= atom_idx < self.n_atoms
+                            ):
+
+                                interface_atoms.append(
+                                    atom_idx
+                                )
+
+        # ============================================================
+        # Existing fallback interface logic
+        # ============================================================
+
+        if (
+            self.is_polymer
+            and len(interface_atoms) == 0
+            and self.polymer_info
+        ):
+
+            interface_atoms = list(
+                range(
+                    min(
+                        len(self.polymer_info) * 2,
+                        max(
+                            1,
+                            self.n_atoms // 4
+                        )
+                    )
+                )
+            )
+
+        self.interface_idx = np.array(
+            sorted(set(interface_atoms)),
+            dtype=np.int64
+        )
+
+
+
 
 class BatchMolGraph:
     """
@@ -1069,23 +1158,23 @@ class BatchMolGraph:
         self.b_scope = []  # list of tuples indicating (start_bond_index, num_bonds) for each molecule
         self.degree_of_polym = []  # list of floats with degree of polymerization used when --polymer
         
-       # =====================================================
-# Motif-aware batch attributes
-# =====================================================
+        # =====================================================
+        # Motif-aware batch attributes
+        # =====================================================
 
-# atom index -> global motif instance id
+        # atom index -> global motif instance id
         self.atom_to_motif_batch = None
 
-# global motif instance -> list of global atom indices
+        # global motif instance -> list of global atom indices
         self.motif_to_atoms_batch = {}
 
-# global motif instance -> motif type
+        # global motif instance -> motif type
         self.motif_instance_type_batch = {}
 
-# interface atoms in batch
+        # interface atoms in batch
         self.interface_idx_batch = None
 
-# total motif instances in batch
+        # total motif instances in batch
         self.num_motifs = 0
 
         # All start with zero padding so that indexing with zero padding returns zeros
@@ -1128,17 +1217,17 @@ class BatchMolGraph:
             # Concatenate motif assignments (NEW)
             if mol_graph.atom_to_motif is not None:
 
-    # --------------------------------------------
-    # atom -> motif instance
-    # --------------------------------------------
+                # --------------------------------------------
+                # atom -> motif instance
+                # --------------------------------------------
 
                atom_to_motif_list.extend(
-        (mol_graph.atom_to_motif + motif_id_offset).tolist()
-    )
+                    (mol_graph.atom_to_motif + motif_id_offset).tolist()
+               )
 
-    # --------------------------------------------
-    # motif instance -> atoms
-    # --------------------------------------------
+                # --------------------------------------------
+                # motif instance -> atoms
+                # --------------------------------------------
 
                atom_offset = self.n_atoms - mol_graph.n_atoms
 
@@ -1158,9 +1247,9 @@ class BatchMolGraph:
 
                motif_id_offset += mol_graph.num_motifs
 
-    # --------------------------------------------
-    # interface atoms
-    # --------------------------------------------
+                # --------------------------------------------
+                # interface atoms
+                # --------------------------------------------
 
                if mol_graph.interface_idx is not None and len(mol_graph.interface_idx) > 0:
 
@@ -1186,21 +1275,6 @@ class BatchMolGraph:
         self.interface_idx_batch = torch.LongTensor(interface_idx_list) if interface_idx_list else torch.LongTensor([])
         self.num_motifs = motif_id_offset
         
-        #print(
-    #f"[BatchMolGraph] "
-    #f"{len(mol_graphs)} molecules → "
-    #f"{self.n_atoms} atoms, "
-    #f"{self.num_motifs} motif instances, "
-    #f"{len(interface_idx_list)} interface atoms"
-#)
-
-        #for motif_id in sorted(self.motif_to_atoms_batch):
-
-            #print(
-        #f"  Instance {motif_id:2d} | "
-        #f"{self.motif_instance_type_batch[motif_id]:20s} | "
-        #f"{len(self.motif_to_atoms_batch[motif_id])} atoms"
-        #    )
 
     def get_components(self, atom_messages: bool = False) -> Tuple[torch.FloatTensor, torch.FloatTensor,
                                                                    torch.FloatTensor, torch.FloatTensor,
@@ -1235,13 +1309,6 @@ class BatchMolGraph:
         return self.f_atoms, f_bonds, self.f_bond_only, self.w_atoms, self.w_bonds, self.a2b, self.b2a, self.b2revb, \
                self.a_scope, self.b_scope, self.degree_of_polym
         
-        #print("\n========== INPUT ==========")
-        #print(f"f_atoms        : {f_atoms.shape}")
-        #print(f"f_bonds        : {f_bonds.shape}")
-        #print(f"f_bond_only    : {f_bond_only.shape}")
-        #print(f"a2b            : {a2b.shape}")
-        #print(f"b2a            : {b2a.shape}")
-        #print(f"b2revb         : {b2revb.shape}")
 
     def get_b2b(self) -> torch.LongTensor:
         """
