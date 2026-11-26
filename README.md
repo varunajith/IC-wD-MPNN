@@ -121,8 +121,8 @@ If you use the original polymer wD-MPNN representation, please cite:
 ```
 
 If you use IC-wD-MPNN, please also cite the associated IC-wD-MPNN publication when available.
-         publisher="The Royal Society of Chemistry",
-         doi="10.1039/D2SC02839E",
-         url="http://dx.doi.org/10.1039/D2SC02839E"
+         publisher="",
+         doi="",
+         url=""
 }
 ```
