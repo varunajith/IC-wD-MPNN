@@ -16,10 +16,8 @@ sys.path.insert(0, os.path.abspath('../..'))
 
 
 # -- Project information -----------------------------------------------------
-
-project = 'chemprop'
-copyright = '2020, Kyle Swanson, Kevin Yang, Wengong Jin, Lior Hirschfeld, Allison Tam'
-author = 'Kyle Swanson, Kevin Yang, Wengong Jin, Lior Hirschfeld, Allison Tam'
+project = 'IC-wD-MPNN'
+author = 'Varun Ajith, Rocio Mercado'
 
 # The full version, including alpha/beta/rc tags
 release = '1.4.0'
@@ -51,10 +49,6 @@ exclude_patterns = []
 #
 html_theme = 'default'
 
-# Add any paths that contain custom static files (such as style sheets) here,
-# relative to this directory. They are copied after the builtin static files,
-# so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static']
 
 
 # -- Autodoc configuration ---------------------------------------------------
