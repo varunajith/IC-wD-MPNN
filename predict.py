@@ -1,4 +1,4 @@
-"""Loads a trained chemprop model checkpoint and makes predictions on a dataset."""
+"""Make predictions using a trained IC-wD-MPNN model."""
 
 from chemprop.train import chemprop_predict
 

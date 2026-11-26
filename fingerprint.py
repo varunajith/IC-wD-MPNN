@@ -1,5 +1,4 @@
-"""Loads a trained chemprop model checkpoint and encode latent fingerprint vectors for the molecules in a dataset.
-    Uses the same command line arguments as predict."""
+"""Extract latent molecular representations from a trained IC-wD-MPNN model."""
 
 from chemprop.train import chemprop_fingerprint
 

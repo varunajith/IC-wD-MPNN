@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+"""Prepare train, validation, and test splits from a precomputed k-fold pickle file."""
 
 import pandas as pd
 import argparse
