@@ -9,7 +9,7 @@ import torch.nn as nn
 from chemprop.args import TrainArgs
 from chemprop.features import BatchMolGraph, get_atom_fdim, get_bond_fdim, mol2graph
 from chemprop.nn_utils import index_select_ND, get_activation_function
-from chemprop.models.motif import MotifAttentionPooling, InterfaceEnrichment
+from chemprop.models.motif_representation import MotifAttentionPooling, InterfaceEnrichment
 
 
 class MPNEncoder(nn.Module):

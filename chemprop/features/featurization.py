@@ -793,7 +793,7 @@ class MolGraph:
         from rdkit import Chem
         import numpy as np
 
-        from chemprop.features.polymer_motifs_v2 import (
+        from chemprop.features.motif_vocabulary import (
         SCAFFOLD_MOTIFS,
         FUNCTIONAL_MOTIFS,
         )
