@@ -41,8 +41,6 @@ setup(
             'chemprop_fingerprint=chemprop.train:chemprop_fingerprint',
             'chemprop_hyperopt=chemprop.hyperparameter_optimization:chemprop_hyperopt',
             'chemprop_interpret=chemprop.interpret:chemprop_interpret',
-            'sklearn_train=chemprop.sklearn_train:sklearn_train',
-            'sklearn_predict=chemprop.sklearn_predict:sklearn_predict',
         ]
     },
     install_requires=[
