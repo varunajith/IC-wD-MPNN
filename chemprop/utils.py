@@ -193,7 +193,7 @@ def load_frzn_model(model: torch.nn,
     """
     debug = logger.debug if logger is not None else print
 
-    loaded_mpnn_model = torch.load(path, map_location=lambda storage, loc: storage)
+    loaded_mpnn_model = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
     loaded_state_dict = loaded_mpnn_model['state_dict']
     loaded_args = loaded_mpnn_model['args']
 
@@ -274,7 +274,7 @@ def load_scalers(path: str) -> Tuple[StandardScaler, StandardScaler, StandardSca
     :return: A tuple with the data :class:`~chemprop.data.scaler.StandardScaler`
              and features :class:`~chemprop.data.scaler.StandardScaler`.
     """
-    state = torch.load(path, map_location=lambda storage, loc: storage)
+    state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
 
     scaler = StandardScaler(state['data_scaler']['means'],
                             state['data_scaler']['stds']) if state['data_scaler'] is not None else None
@@ -307,7 +307,7 @@ def load_args(path: str) -> TrainArgs:
     :return: The :class:`~chemprop.args.TrainArgs` object that the model was trained with.
     """
     args = TrainArgs()
-    args.from_dict(vars(torch.load(path, map_location=lambda storage, loc: storage)['args']), skip_unsettable=True)
+    args.from_dict(vars(torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)['args']), skip_unsettable=True)
 
     return args
 

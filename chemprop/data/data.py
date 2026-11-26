@@ -1,4 +1,10 @@
+from collections import OrderedDict
+from copy import deepcopy
+from functools import partial
+from random import Random
 import threading
+
+import chemprop.features.featurization as featurization
 from collections import OrderedDict
 from random import Random
 from typing import Dict, Iterator, List, Optional, Union, Tuple
@@ -16,6 +22,10 @@ from chemprop.rdkit import make_mol, make_polymer_mol
 # Cache of graph featurizations
 CACHE_GRAPH = True
 SMILES_TO_GRAPH: Dict[str, MolGraph] = {}
+
+def _initialize_worker(worker_id: int, featurization_params):
+    """Restore featurization parameters in a DataLoader worker."""
+    featurization.PARAMS = deepcopy(featurization_params)
 
 
 def cache_graph() -> bool:
@@ -647,6 +657,13 @@ class MoleculeDataLoader(DataLoader):
             shuffle=self._shuffle,
             seed=self._seed
         )
+        worker_init_fn = None
+
+        if self._num_workers > 0:
+            worker_init_fn = partial(
+                _initialize_worker,
+                featurization_params=deepcopy(featurization.PARAMS),
+        )
 
         super(MoleculeDataLoader, self).__init__(
             dataset=self._dataset,
@@ -655,6 +672,7 @@ class MoleculeDataLoader(DataLoader):
             num_workers=self._num_workers,
             collate_fn=construct_molecule_batch,
             multiprocessing_context=self._context,
+            worker_init_fn=worker_init_fn,
             timeout=self._timeout
         )
 
