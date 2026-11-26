@@ -1,4 +1,4 @@
-# IC-wD-MPNN: Motif-Aware Message Passing for Polymer Property Prediction
+# IC-wD-MPNN: Interface Conditioned Message Passing for Polymer Property Prediction
 
 IC-wD-MPNN is a motif-aware extension of the weighted directed message-passing neural network (wD-MPNN) for polymer property prediction. It builds on the polymer graph representation introduced by Aldeghi and Coley, incorporating explicit chemical motif information into the message-passing process.
 
