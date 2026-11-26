@@ -32,6 +32,12 @@ The supplied environment provides a baseline CPU-compatible setup. GPU users may
 
 All command-line scripts should be run from the repository root.
 
+### Polymer input format
+
+IC-wD-MPNN uses the polymer string representation introduced in the original wD-MPNN framework. This representation encodes monomer structures, their relative abundances and possible polymerization connections, together with associated transition weights.
+
+For a detailed explanation of the input syntax and worked examples, refer to the original [wD-MPNN repository](https://github.com/coleygroup/polymer-chemprop) and the paper by Aldeghi and Coley.
+
 ### Training
 
 Training requires a CSV file containing the polymer input representation and target property columns.
