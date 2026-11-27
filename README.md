@@ -97,7 +97,9 @@ python hyperparameter_optimization.py --help
 
 Full documentation for IC-wD-MPNN is available on **[Read the Docs](https://ic-wd-mpnn.readthedocs.io/en/latest/)**.
 
-The documentation provides installation instructions, details of the model architecture and motif representation, training and prediction workflows, and command-line references. It is built using Sphinx and hosted on Read the Docs.
+The documentation covers installation, model architecture, motif representation, training and prediction workflows, and command-line usage. It is built using Sphinx and hosted on Read the Docs.
+
+The documentation source files, written in reStructuredText (`.rst`), are maintained in the [`docs/source/`](docs/source/) directory of this repository. The Sphinx configuration and build instructions are also included in `docs/`, allowing the documentation to be built locally.
 
 ## Acknowledgements
 
