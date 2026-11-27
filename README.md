@@ -1,3 +1,4 @@
+[![Documentation](https://readthedocs.org/projects/ic-wd-mpnn/badge/?version=latest)](https://ic-wd-mpnn.readthedocs.io/en/latest/)
 # IC-wD-MPNN: Interface Conditioned Message Passing for Polymer Property Prediction
 
 IC-wD-MPNN is a motif-aware extension of the weighted directed message-passing neural network (wD-MPNN) for polymer property prediction. It builds on the polymer graph representation introduced by Aldeghi and Coley, incorporating explicit chemical motif information into the message-passing process.
@@ -14,8 +15,6 @@ The main components of IC-wD-MPNN are:
 - **Motif-aware message passing:** Allows motif-conditioned information to propagate through the atomic graph for downstream property prediction.
 
 Motifs act as auxiliary representations rather than nodes in a separate hierarchical graph. The underlying computation remains grounded in the original atom-level graph.
-
-For further details, see the [documentation](docs/source/index.rst).
 
 ## Installation
 
@@ -94,12 +93,11 @@ python predict.py --help
 python fingerprint.py --help
 python hyperparameter_optimization.py --help
 ```
-
 ## Documentation
 
-## Documentation
+Full documentation for IC-wD-MPNN is available on **[Read the Docs](https://ic-wd-mpnn.readthedocs.io/en/latest/)**.
 
-Full documentation, including installation instructions, usage examples, and implementation details, is available on [Read the Docs]([YOUR_DOCUMENTATION_URL](https://ic-wd-mpnn.readthedocs.io/en/latest/)).
+The documentation provides installation instructions, details of the model architecture and motif representation, training and prediction workflows, and command-line references. It is built using Sphinx and hosted on Read the Docs.
 
 ## Acknowledgements
 
