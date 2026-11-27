@@ -48,6 +48,7 @@ exclude_patterns = []
 # a list of builtin themes.
 #
 html_theme = 'default'
+html_static_path = ['_static']
 
 
 
