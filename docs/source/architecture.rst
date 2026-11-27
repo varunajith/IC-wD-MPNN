@@ -1,3 +1,4 @@
+
 Model architecture
 ==================
 
@@ -9,10 +10,22 @@ polymer property prediction. It operates on the original atom-level graph
 and introduces motif information into message passing at polymerization
 interfaces.
 
+Overall architecture
+--------------------
+
+The overall architecture and information flow of IC-wD-MPNN are illustrated
+below.
+
+.. figure:: _static/images/IC-wD-MPNN_workflow.png
+   :align: center
+   :alt: Overall architecture and workflow of IC-wD-MPNN
+   :width: 100%
+
 Message-passing stages
 ----------------------
 
 The encoder in :mod:`chemprop.models.mpn` follows a staged computation:
+
 
 1. **Initial message passing:** directed messages propagate over the atomic
    graph to construct atom representations.
