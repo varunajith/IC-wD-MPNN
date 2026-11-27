@@ -111,15 +111,15 @@ IC-wD-MPNN builds upon the weighted directed message-passing neural network (wD-
 If you use the original polymer wD-MPNN representation, please cite:
 
 ```bibtex
-@article{wdmpnn,
-    title={A graph representation of molecular ensembles for polymer property prediction},
-    author={Matteo Aldeghi and Connor W. Coley},
-    journal={Chemical Science},
-    year={2022},
-    volume={13},
-    issue={35},
-    pages={10486--10498},
-    doi={10.1039/D2SC02839E}
+@article{aldeghi2022graph,
+  title={A graph representation of molecular ensembles for polymer property prediction},
+  author={Aldeghi, Matteo and Coley, Connor W},
+  journal={Chemical Science},
+  volume={13},
+  number={35},
+  pages={10486--10498},
+  year={2022},
+  publisher={The Royal Society of Chemistry}
 }
 ```
 
