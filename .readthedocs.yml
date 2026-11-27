@@ -5,5 +5,8 @@ version: 2
 sphinx:
   configuration: docs/source/conf.py
 
-formats: all
+formats:
+  - pdf
+  - epub
+
 
