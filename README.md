@@ -97,7 +97,9 @@ python hyperparameter_optimization.py --help
 
 ## Documentation
 
-Detailed documentation covering the polymer representation, model architecture, motif representation, training, prediction, fingerprint extraction and hyperparameter optimization is available in the [`docs/`](docs/source/index.rst) directory.
+## Documentation
+
+Full documentation, including installation instructions, usage examples, and implementation details, is available on [Read the Docs]([YOUR_DOCUMENTATION_URL](https://ic-wd-mpnn.readthedocs.io/en/latest/)).
 
 ## Acknowledgements
 
